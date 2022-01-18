@@ -57,6 +57,7 @@ __global__ void Sgemm(
     const int B_TILE_ROW_STRIDE = THREAD_NUM_PER_BLOCK / B_TILE_THREAD_PER_ROW;
     // prefetch first big(block_size_k stride K) and small(1 stride block_size_k) iter's data before big iter, including global -> tmp reg -> shared mem -> reg
     /// A global->shared, including transpose, every thread here fetch two times totally 8 floats into As
+    #pragma unroll
     for (int i = 0; i < BLOCK_SIZE_M; i += A_TILE_ROW_STRIDE){
         int ldg_index = i/A_TILE_ROW_STRIDE * 4
         FETCH_FLOAT4(tmp_a_reg[ldg_index]) = FETCH_FLOAT4(A[OFFSET(
@@ -77,6 +78,7 @@ __global__ void Sgemm(
     //         N
     //     )]);
     // }
+    #pragma unroll
     for (int i = 0; i < BLOCK_SIZE_K; i += B_TILE_ROW_STRIDE){
         int ldg_index = i/B_TILE_ROW_STRIDE * 4;
         FETCH_FLOAT4(tmp_b_reg[ldg_index]) = FETCH_FLOAT4(B[OFFSET(
@@ -87,9 +89,11 @@ __global__ void Sgemm(
     }
     __syncthreads();
     /// prefetch first!! small iter, A and B shared -> reg
+    #pragma unroll
     for (int thread_y = 0; thread_y < THREAD_SIZE_Y; thread_y += 4){
         FETCH_FLOAT4(a_reg[0][thread_y]) = FETCH_FLOAT4(As[0][0][ty*THREAD_SIZE_Y+thread_y]);
     }
+    #pragma unroll
     for (int thread_x = 0; thread_x < THREAD_SIZE_X; thread_x += 4){
         FETCH_FLOAT4(b_reg[0][thread_x]) = FETCH_FLOAT4(Bs[0][0][tx*THREAD_SIZE_X+thread_x]);
     }
@@ -111,6 +115,7 @@ __global__ void Sgemm(
                     tile_idx + A_TILE_COL,
                     K)]);
             }
+            #pragma unroll
             for (int i = 0; i < BLOCK_SIZE_K; i += B_TILE_ROW_STRIDE){
                 int ldg_index = i/B_TILE_ROW_STRIDE * 4;
                 FETCH_FLOAT4(tmp_b_reg[ldg_index]) = FETCH_FLOAT4(B[OFFSET(
@@ -121,16 +126,21 @@ __global__ void Sgemm(
         }
         // 7 small iters
         int load_stage_idx = write_stage_idx ^ 1;//0
+        #pragma unroll
         for (int j = 0; j < BLOCK_SIZE_K - 1; ++j){
             // prefetch next small iter, shared mem -> reg
+            #pragma unroll
             for (int thread_y = 0; thread_y < THREAD_SIZE_Y; thread_y += 4){
                 FETCH_FLOAT4(a_reg[(j+1)%2][thread_y]) = FETCH_FLOAT4(As[load_stage_idx][j+1][ty*THREAD_SIZE_Y+thread_y])//because are prefetch next smll iter,so the index should be j+1
             }
+            #pragma unroll
             for (int thread_x = 0; thread_x < THREAD_SIZE_X; thread_x += 4){
                 FETCH_FLOAT4(b_reg[(j+1)%2][thread_x]) = FETCH_FLOAT4(Bs[load_stage_idx][j+1][tx*THREAD_SIZE_X+thread_x])
             }
             // unroll loop, compute cur thread 8x8
+            #pragma unroll
             for (thread_y = 0; thread_y < THREAD_SIZE_Y; thread_y++){
+                #pragma unroll
                 for (thread_x = 0; thread_x < THREAD_SIZE_X; thread_x++){
                     accum[thread_y][thread_x] += a_reg[j%2][thread_y] * b_reg[j%2][thread_x]
                 }
@@ -138,6 +148,7 @@ __global__ void Sgemm(
         }
         // prefetch next big iter, tmp reg -> shared mem
         if (tile_idx < K){
+            #pragma unroll
             for (int i = 0; i < BLOCK_SIZE_M; i += A_TILE_ROW_STRIDE){
                 int ldg_index = i / A_TILE_ROW_STRIDE * 4;
                 As[write_stage_idx][A_TILE_COL][A_TILE_ROW_START+i] = tmp_a_reg[ldg_index]
@@ -145,6 +156,7 @@ __global__ void Sgemm(
                 As[write_stage_idx][A_TILE_COL+2][A_TILE_ROW_START+i] = tmp_a_reg[ldg_index+2]
                 As[write_stage_idx][A_TILE_COL+3][A_TILE_ROW_START+i] = tmp_a_reg[ldg_index+3]
             }
+            #pragma unroll
             for (int i = 0; i < BLOCK_SIZE_K; i += B_TILE_ROW_STRIDE){
                 int ldg_index = i / B_TILE_ROW_STRIDE * 4;
                 FETCH_FLOAT4(Bs[write_stage_idx][B_TILE_ROW_START + i][B_TILE_COL]) = FETCH_FLOAT4(tmp_b_reg[ldg_index]);
@@ -154,13 +166,16 @@ __global__ void Sgemm(
         }
         // 8th small iter, do same thing as what we do before big iter
             // prefetch next big iter, shared to reg
+        #pragma unroll
         for (int thread_y=0; thread_y < THREAD_SIZE_Y; thread_y+=4) {
             FETCH_FLOAT4(a_reg[0][thread_y]) = FETCH_FLOAT4(As[load_stage_idx^1][0][THREAD_SIZE_Y * ty + thread_y]);
         }
+        #pragma unroll
         for (int thread_x = 0; thread_x < THREAD_SIZE_X; thread_x += 4) {
             FETCH_FLOAT4(b_reg[0][thread_x]) = FETCH_FLOAT4(Bs[load_stage_idx^1][0][THREAD_SIZE_X * tx + thread_x]);
         }
             // unroll loop, compute cur thread 8x8
+        #pragma unroll
         for (int thread_y = 0; thread_y < THREAD_SIZE_Y; ++thread_y) {
             #pragma unroll
             for (int thread_x = 0; thread_x < THREAD_SIZE_X; ++thread_x) {
@@ -169,7 +184,9 @@ __global__ void Sgemm(
         }
     }while (tile_idx < K);
     // store back to C， accum to C, thread level
+    #pragma unroll
     for (int thread_y = 0; thread_y < THREAD_SIZE_Y; thread_y++)
+        #pragma unroll
         for (int thread_x = 0; thread_x < THREAD_SIZE_X; thread_x+=4){
             FETCH_FLOAT4(C[OFFSET(
                 by * BLOCK_SIZE_M + ty * THREAD_SIZE_Y + thread_y,
